@@ -13,6 +13,8 @@ gpa: Allocator,
 servers: []Server,
 hasher: Hasher,
 round_robin: std.atomic.Value(usize),
+retry_attempts: usize,
+retry_interval: zio.Duration,
 
 pub const Options = struct {
     servers: []const []const u8 = &.{},
@@ -23,6 +25,8 @@ pub const Options = struct {
     connect_timeout: zio.Timeout = .none,
     read_timeout: zio.Timeout = .none,
     write_timeout: zio.Timeout = .none,
+    retry_attempts: usize = 2,
+    retry_interval: zio.Duration = .zero,
 };
 
 // Re-export types for convenience
@@ -56,6 +60,8 @@ pub fn init(gpa: Allocator, options: Options) !Client {
         .servers = servers,
         .hasher = options.hasher,
         .round_robin = std.atomic.Value(usize).init(0),
+        .retry_attempts = options.retry_attempts,
+        .retry_interval = options.retry_interval,
     };
 }
 
@@ -77,33 +83,40 @@ fn pickServer(self: *Client, key: []const u8) *Server {
 }
 
 fn withConnection(self: *Client, key: []const u8, comptime func: anytype, args: anytype) !ReturnType(func) {
-    const server = self.pickServer(key);
-    const conn = try server.pool.acquire();
-    var ok = false;
-    defer server.pool.release(conn, ok);
-
-    const result = @call(.auto, func, .{conn} ++ args) catch |err| {
-        ok = Protocol.isResumable(err);
-        return err;
-    };
-    ok = true;
-    return result;
+    return self.withServer(self.pickServer(key), func, args);
 }
 
 fn withAnyConnection(self: *Client, comptime func: anytype, args: anytype) !ReturnType(func) {
-    // For commands that don't have a key, use round-robin
     const index = self.round_robin.fetchAdd(1, .monotonic) % self.servers.len;
-    const server = &self.servers[index];
-    const conn = try server.pool.acquire();
-    var ok = false;
-    defer server.pool.release(conn, ok);
+    return self.withServer(&self.servers[index], func, args);
+}
 
-    const result = @call(.auto, func, .{conn} ++ args) catch |err| {
-        ok = Protocol.isResumable(err);
-        return err;
-    };
-    ok = true;
-    return result;
+fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anytype) !ReturnType(func) {
+    var attempts: usize = 0;
+    while (true) {
+        const conn = server.pool.acquire() catch |err| {
+            if (attempts < self.retry_attempts) {
+                attempts += 1;
+                try zio.sleep(self.retry_interval);
+                continue;
+            }
+            return err;
+        };
+        var ok = false;
+        defer server.pool.release(conn, ok);
+
+        const result = @call(.auto, func, .{conn} ++ args) catch |err| {
+            ok = Protocol.isResumable(err);
+            if (!ok and attempts < self.retry_attempts) {
+                attempts += 1;
+                try zio.sleep(self.retry_interval);
+                continue;
+            }
+            return err;
+        };
+        ok = true;
+        return result;
+    }
 }
 
 fn ReturnType(comptime func: anytype) type {
