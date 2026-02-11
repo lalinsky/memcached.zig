@@ -1,9 +1,20 @@
 const std = @import("std");
 const Server = @import("Server.zig");
 
+/// Server selection strategy for distributing keys across servers.
 pub const Hasher = union(enum) {
+    /// Round-robin selection, no key affinity. Good for load balancing
+    /// when you don't need the same key to hit the same server.
     none,
+
+    /// Rendezvous (highest random weight) hashing. O(n) per lookup but
+    /// minimal disruption when servers change - only ~1/n keys remap.
     rendezvous,
+
+    /// Simple modulo hashing. O(1) lookup but poor disruption properties -
+    /// most keys remap when servers change. Best for static server sets.
+    modulo,
+
     // maglev: MaglevTable, // later
 
     pub fn pick(self: Hasher, servers: []const Server, key: []const u8) usize {
@@ -12,9 +23,14 @@ pub const Hasher = union(enum) {
         return switch (self) {
             .none => unreachable, // handled by Client with atomic counter
             .rendezvous => rendezvousHash(servers, key),
+            .modulo => moduloHash(servers, key),
         };
     }
 };
+
+fn moduloHash(servers: []const Server, key: []const u8) usize {
+    return std.hash.Wyhash.hash(0, key) % servers.len;
+}
 
 fn rendezvousHash(servers: []const Server, key: []const u8) usize {
     var best: u64 = 0;
@@ -22,7 +38,7 @@ fn rendezvousHash(servers: []const Server, key: []const u8) usize {
 
     for (servers, 0..) |server, i| {
         // Use precomputed server hash_id as seed, hash the key
-        var h = std.hash.XxHash64.init(server.hash_id);
+        var h = std.hash.Wyhash.init(server.hash_id);
         h.update(key);
         const score = h.final();
 

@@ -11,7 +11,7 @@ hash_id: u64, // precomputed hash for rendezvous
 
 pub fn init(gpa: Allocator, host: []const u8, port: u16, pool_opts: Pool.Options) Server {
     // Precompute server identity hash
-    var h = std.hash.XxHash64.init(0);
+    var h = std.hash.Wyhash.init(0);
     h.update(host);
     h.update(std.mem.asBytes(&port));
 
