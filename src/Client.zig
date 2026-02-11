@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Connection = @import("Connection.zig");
 const Pool = @import("Pool.zig");
+const Protocol = @import("Protocol.zig");
 const Server = @import("Server.zig");
 const Hasher = @import("hasher.zig").Hasher;
 
@@ -74,7 +75,10 @@ fn withConnection(self: *Client, key: []const u8, comptime func: anytype, args: 
     var ok = false;
     defer server.pool.release(conn, ok);
 
-    const result = try @call(.auto, func, .{conn} ++ args);
+    const result = @call(.auto, func, .{conn} ++ args) catch |err| {
+        ok = Protocol.isResumable(err);
+        return err;
+    };
     ok = true;
     return result;
 }
@@ -87,7 +91,10 @@ fn withAnyConnection(self: *Client, comptime func: anytype, args: anytype) !Retu
     var ok = false;
     defer server.pool.release(conn, ok);
 
-    const result = try @call(.auto, func, .{conn} ++ args);
+    const result = @call(.auto, func, .{conn} ++ args) catch |err| {
+        ok = Protocol.isResumable(err);
+        return err;
+    };
     ok = true;
     return result;
 }
@@ -172,4 +179,112 @@ test "parseServer ipv6" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("[::1]", result.?[0]);
     try std.testing.expectEqual(11211, result.?[1]);
+}
+
+test "Client get/set" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+    });
+    defer client.deinit();
+
+    try client.set("client_test_key", "client_test_value", .{});
+
+    var buf: [1024]u8 = undefined;
+    const info = try client.get("client_test_key", &buf, .{});
+
+    try std.testing.expect(info != null);
+    try std.testing.expectEqualStrings("client_test_value", info.?.value);
+}
+
+test "Client get non-existent returns null" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+    });
+    defer client.deinit();
+
+    var buf: [1024]u8 = undefined;
+    const info = try client.get("non_existent_client_key", &buf, .{});
+
+    try std.testing.expect(info == null);
+}
+
+test "Client incr/decr" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+    });
+    defer client.deinit();
+
+    try client.set("client_counter", "100", .{});
+
+    const val1 = try client.incr("client_counter", 10);
+    try std.testing.expectEqual(110, val1);
+
+    const val2 = try client.decr("client_counter", 5);
+    try std.testing.expectEqual(105, val2);
+}
+
+test "Client delete" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+    });
+    defer client.deinit();
+
+    try client.set("client_delete_key", "to_delete", .{});
+    try client.delete("client_delete_key");
+
+    var buf: [1024]u8 = undefined;
+    const info = try client.get("client_delete_key", &buf, .{});
+    try std.testing.expect(info == null);
+}
+
+test "Client connection reused after NotStored error" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+        .max_idle = 1,
+    });
+    defer client.deinit();
+
+    // Ensure key doesn't exist
+    client.delete("reuse_test_key") catch {};
+
+    // add() on non-existent key succeeds
+    try client.add("reuse_test_key", "first", .{});
+
+    // add() again should fail with NotStored - but connection should be reused
+    try std.testing.expectError(error.NotStored, client.add("reuse_test_key", "second", .{}));
+
+    // Connection should still work - this would fail if connection was closed
+    var buf: [1024]u8 = undefined;
+    const info = try client.get("reuse_test_key", &buf, .{});
+    try std.testing.expectEqualStrings("first", info.?.value);
+
+    // Verify connection was reused (pool should not be empty)
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+}
+
+test "Client connection reused after Exists error (CAS conflict)" {
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = &.{"127.0.0.1:21211"},
+        .max_idle = 1,
+    });
+    defer client.deinit();
+
+    try client.set("cas_reuse_key", "original", .{});
+
+    var buf: [1024]u8 = undefined;
+    const info = try client.get("cas_reuse_key", &buf, .{});
+    const old_cas = info.?.cas;
+
+    // Update the key to invalidate the CAS token
+    try client.set("cas_reuse_key", "updated", .{});
+
+    // CAS with old token should fail with Exists - but connection should be reused
+    try std.testing.expectError(error.Exists, client.set("cas_reuse_key", "conflict", .{ .cas = old_cas }));
+
+    // Connection should still work
+    const info2 = try client.get("cas_reuse_key", &buf, .{});
+    try std.testing.expectEqualStrings("updated", info2.?.value);
+
+    // Verify connection was reused
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
 }

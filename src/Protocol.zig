@@ -34,6 +34,19 @@ pub const Error = error{
     StreamTooLong,
 };
 
+/// Returns true if the error is a protocol-level error where the connection
+/// is still valid and can be reused.
+pub fn isResumable(err: anyerror) bool {
+    return switch (err) {
+        error.NotStored,
+        error.NotFound,
+        error.Exists,
+        error.ValueTooLarge,
+        => true,
+        else => false,
+    };
+}
+
 pub const Info = struct {
     value: []u8,
     flags: u32,

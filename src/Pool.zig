@@ -61,6 +61,12 @@ pub fn acquire(self: *Pool) !*Connection {
     return conn;
 }
 
+pub fn isEmpty(self: *Pool) bool {
+    self.mutex.lockUncancelable();
+    defer self.mutex.unlock();
+    return self.idle_count == 0;
+}
+
 pub fn release(self: *Pool, conn: *Connection, ok: bool) void {
     // If error occurred, close the connection
     if (!ok) {
