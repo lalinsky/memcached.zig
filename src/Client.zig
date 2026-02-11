@@ -308,3 +308,60 @@ test "Client connection reused after Exists error (CAS conflict)" {
     // Verify connection was reused
     try std.testing.expect(!client.servers[0].pool.isEmpty());
 }
+
+test "key distribution across servers" {
+    const servers = &[_][]const u8{
+        "127.0.0.1:21211",
+        "127.0.0.1:21212",
+        "127.0.0.1:21213",
+    };
+
+    // Create distributed client
+    var client = try Client.init(std.testing.allocator, .{
+        .servers = servers,
+        .hasher = .rendezvous,
+    });
+    defer client.deinit();
+
+    // Set 100 keys via distributed client
+    const num_keys = 100;
+    var key_buf: [32]u8 = undefined;
+    for (0..num_keys) |i| {
+        const key = std.fmt.bufPrint(&key_buf, "dist_test_{d}", .{i}) catch unreachable;
+        try client.set(key, "value", .{});
+    }
+
+    // Connect to each server individually and count keys found
+    var counts = [_]usize{ 0, 0, 0 };
+
+    for (servers, 0..) |server_str, server_idx| {
+        const host, const port = parseServer(server_str).?;
+
+        var conn: Connection = undefined;
+        try conn.connect(std.testing.allocator, host, port, .{});
+        defer conn.close();
+
+        var buf: [1024]u8 = undefined;
+        for (0..num_keys) |i| {
+            const key = std.fmt.bufPrint(&key_buf, "dist_test_{d}", .{i}) catch unreachable;
+            if (try conn.get(key, &buf, .{})) |_| {
+                counts[server_idx] += 1;
+            }
+        }
+    }
+
+    // Verify distribution
+    errdefer std.debug.print("\nDistribution: {d} / {d} / {d}\n", .{ counts[0], counts[1], counts[2] });
+
+    var total: usize = 0;
+    for (counts) |c| {
+        total += c;
+        // Each server should have some keys (at least 10%)
+        try std.testing.expect(c >= 10);
+        // But not all keys (at most 60%)
+        try std.testing.expect(c <= 60);
+    }
+
+    // Total should equal num_keys (each key on exactly one server)
+    try std.testing.expectEqual(num_keys, total);
+}
