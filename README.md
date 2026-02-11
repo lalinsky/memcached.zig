@@ -1,6 +1,6 @@
 # memcached.zig
 
-A memcached client library for Zig, built on [zio](https://github.com/lalinsky/zio) for async I/O. Uses the modern [meta protocol](https://github.com/memcached/memcached/wiki/MetaCommands) for efficient communication.
+A memcached client library for Zig, built on [zio](https://github.com/lalinsky/zio) for async I/O. Uses the modern [meta protocol](https://docs.memcached.org/protocols/meta/) for efficient communication.
 
 ## Features
 
