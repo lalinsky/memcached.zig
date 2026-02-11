@@ -16,6 +16,9 @@ write_buffer: []u8,
 pub const Options = struct {
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
+    connect_timeout: zio.Timeout = .none,
+    read_timeout: zio.Timeout = .none,
+    write_timeout: zio.Timeout = .none,
 };
 
 // Re-export Protocol types for convenience
@@ -25,7 +28,9 @@ pub const SetOpts = Protocol.SetOpts;
 pub const Error = Protocol.Error;
 
 pub fn connect(self: *Connection, gpa: Allocator, host: []const u8, port: u16, options: Options) !void {
-    const stream = zio.net.tcpConnectToHost(host, port, .{}) catch return error.ConnectionFailed;
+    const stream = zio.net.tcpConnectToHost(host, port, .{
+        .timeout = options.connect_timeout,
+    }) catch return error.ConnectionFailed;
     errdefer stream.close();
 
     const read_buffer = try gpa.alloc(u8, options.read_buffer_size);
@@ -42,6 +47,9 @@ pub fn connect(self: *Connection, gpa: Allocator, host: []const u8, port: u16, o
         .read_buffer = read_buffer,
         .write_buffer = write_buffer,
     };
+
+    self.reader.setTimeout(options.read_timeout);
+    self.writer.setTimeout(options.write_timeout);
 }
 
 pub fn close(self: *Connection) void {
