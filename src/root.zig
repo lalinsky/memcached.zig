@@ -9,8 +9,8 @@ pub const Server = @import("Server.zig");
 pub const Hasher = @import("hasher.zig").Hasher;
 
 /// Connect to a single memcached server with default options.
-pub fn connect(gpa: Allocator, server: []const u8) !Client {
-    return Client.init(gpa, .{ .servers = &.{server} });
+pub fn connect(gpa: Allocator, io: std.Io, server: []const u8) !Client {
+    return Client.init(gpa, io, .{ .servers = &.{server} });
 }
 
 test {

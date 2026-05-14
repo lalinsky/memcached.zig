@@ -1,10 +1,10 @@
 # memcached.zig
 
-A memcached client library for Zig, built on [zio](https://github.com/lalinsky/zio) for async I/O. Uses the modern [meta protocol](https://docs.memcached.org/protocols/meta/) for efficient communication.
+A memcached client library for Zig, built on `std.Io` for async I/O. Uses the modern [meta protocol](https://docs.memcached.org/protocols/meta/) for efficient communication.
 
 ## Features
 
-- Async I/O via zio coroutines
+- Async I/O via std.Io
 - Connection pooling per server
 - Multi-server support with consistent hashing (rendezvous)
 - Meta protocol (mg, ms, md, ma commands)
@@ -15,17 +15,13 @@ A memcached client library for Zig, built on [zio](https://github.com/lalinsky/z
 
 ```zig
 const std = @import("std");
-const zio = @import("zio");
 const memcached = @import("memcached");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var rt = try zio.Runtime.init(gpa.allocator(), .{});
-    defer rt.deinit();
-
-    var client = try memcached.connect(gpa.allocator(), "localhost:11211");
+    var client = try memcached.connect(allocator, io, "localhost:11211");
     defer client.deinit();
 
     // Set a value
@@ -47,7 +43,7 @@ pub fn main() !void {
 ## Multi-server
 
 ```zig
-var client = try memcached.Client.init(gpa.allocator(), .{
+var client = try memcached.Client.init(allocator, io, .{
     .servers = &.{
         "server1:11211",
         "server2:11211",

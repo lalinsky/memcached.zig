@@ -1,5 +1,4 @@
 const std = @import("std");
-const zio = @import("zio");
 const Allocator = std.mem.Allocator;
 const Protocol = @import("Protocol.zig");
 
@@ -7,18 +6,19 @@ const Connection = @This();
 
 node: std.SinglyLinkedList.Node = .{},
 gpa: Allocator,
-stream: zio.net.Stream,
-reader: zio.net.Stream.Reader,
-writer: zio.net.Stream.Writer,
+io: std.Io,
+stream: std.Io.net.Stream,
+reader: std.Io.net.Stream.Reader,
+writer: std.Io.net.Stream.Writer,
 read_buffer: []u8,
 write_buffer: []u8,
 
 pub const Options = struct {
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
-    connect_timeout: zio.Timeout = .none,
-    read_timeout: zio.Timeout = .none,
-    write_timeout: zio.Timeout = .none,
+    connect_timeout: std.Io.Timeout = .none,
+    read_timeout: std.Io.Timeout = .none,
+    write_timeout: std.Io.Timeout = .none,
 };
 
 // Re-export Protocol types for convenience
@@ -27,11 +27,12 @@ pub const GetOpts = Protocol.GetOpts;
 pub const SetOpts = Protocol.SetOpts;
 pub const Error = Protocol.Error;
 
-pub fn connect(self: *Connection, gpa: Allocator, host: []const u8, port: u16, options: Options) !void {
-    const stream = zio.net.tcpConnectToHost(host, port, .{
+pub fn connect(self: *Connection, gpa: Allocator, io: std.Io, host: []const u8, port: u16, options: Options) !void {
+    const stream = (try std.Io.net.HostName.init(host)).connect(io, port, .{
+        .mode = .stream,
         .timeout = options.connect_timeout,
     }) catch return error.ConnectionFailed;
-    errdefer stream.close();
+    errdefer stream.close(io);
 
     const read_buffer = try gpa.alloc(u8, options.read_buffer_size);
     errdefer gpa.free(read_buffer);
@@ -39,21 +40,38 @@ pub fn connect(self: *Connection, gpa: Allocator, host: []const u8, port: u16, o
     const write_buffer = try gpa.alloc(u8, options.write_buffer_size);
     errdefer gpa.free(write_buffer);
 
+    var reader = stream.reader(io, read_buffer);
+    var writer = stream.writer(io, write_buffer);
+
+    if (options.read_timeout != .none) {
+        if (@hasField(std.Io.net.Stream.Reader, "timeout")) {
+            reader.timeout = options.read_timeout;
+        } else {
+            @panic("read_timeout is set but std.Io.net.Stream.Reader does not support timeouts yet, see https://codeberg.org/ziglang/zig/issues/32166");
+        }
+    }
+
+    if (options.write_timeout != .none) {
+        if (@hasField(std.Io.net.Stream.Writer, "timeout")) {
+            writer.timeout = options.write_timeout;
+        } else {
+            @panic("write_timeout is set but std.Io.net.Stream.Writer does not support timeouts yet, see https://codeberg.org/ziglang/zig/issues/32166");
+        }
+    }
+
     self.* = .{
         .gpa = gpa,
+        .io = io,
         .stream = stream,
-        .reader = stream.reader(read_buffer),
-        .writer = stream.writer(write_buffer),
+        .reader = reader,
+        .writer = writer,
         .read_buffer = read_buffer,
         .write_buffer = write_buffer,
     };
-
-    self.reader.setTimeout(options.read_timeout);
-    self.writer.setTimeout(options.write_timeout);
 }
 
 pub fn close(self: *Connection) void {
-    self.stream.close();
+    self.stream.close(self.io);
     self.gpa.free(self.read_buffer);
     self.gpa.free(self.write_buffer);
 }
@@ -110,7 +128,7 @@ const testing = @import("testing.zig");
 
 test "simple get/set" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("test_key", "test_value", .{}, .set);
@@ -124,7 +142,7 @@ test "simple get/set" {
 
 test "get non-existent key returns null" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     var buf: [1024]u8 = undefined;
@@ -135,7 +153,7 @@ test "get non-existent key returns null" {
 
 test "set with TTL and flags" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("ttl_key", "ttl_value", .{ .ttl = 60, .flags = 42 }, .set);
@@ -150,7 +168,7 @@ test "set with TTL and flags" {
 
 test "delete" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("delete_key", "to_be_deleted", .{}, .set);
@@ -163,7 +181,7 @@ test "delete" {
 
 test "incr/decr" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("counter", "10", .{}, .set);
@@ -177,7 +195,7 @@ test "incr/decr" {
 
 test "version" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     var buf: [64]u8 = undefined;
@@ -188,7 +206,7 @@ test "version" {
 
 test "add only if not exists" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     // Delete first to ensure clean state
@@ -208,7 +226,7 @@ test "add only if not exists" {
 
 test "replace only if exists" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     // Delete first to ensure clean state
@@ -230,7 +248,7 @@ test "replace only if exists" {
 
 test "append/prepend" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("concat_key", "hello", .{}, .set);
@@ -249,7 +267,7 @@ test "append/prepend" {
 
 test "CAS (compare and swap)" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
     defer conn.close();
 
     try conn.set("cas_key", "original", .{}, .set);
