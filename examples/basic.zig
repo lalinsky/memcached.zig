@@ -1,17 +1,12 @@
 const std = @import("std");
-const zio = @import("zio");
 const memcached = @import("memcached");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var rt = try zio.Runtime.init(allocator, .{});
-    defer rt.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Connect
-    var client = try memcached.connect(allocator, "localhost:11211");
+    var client = try memcached.connect(allocator, io, "localhost:11211");
     defer client.deinit();
 
     // Version
