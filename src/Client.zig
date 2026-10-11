@@ -111,9 +111,11 @@ fn ReturnType(comptime func: anytype) type {
     return @typeInfo(Return).error_union.payload;
 }
 
+/// Splits `host:port`, where an IPv6 host is in brackets, `[::1]:11211`.
 fn parseServer(server: []const u8) ?struct { []const u8, u16 } {
     const colon_pos = std.mem.lastIndexOfScalar(u8, server, ':') orelse return null;
-    const host = server[0..colon_pos];
+    var host = server[0..colon_pos];
+    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host = host[1 .. host.len - 1];
     const port = std.fmt.parseInt(u16, server[colon_pos + 1 ..], 10) catch return null;
     return .{ host, port };
 }
@@ -184,7 +186,7 @@ test "parseServer" {
 test "parseServer ipv6" {
     const result = parseServer("[::1]:11211");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("[::1]", result.?[0]);
+    try std.testing.expectEqualStrings("::1", result.?[0]);
     try std.testing.expectEqual(11211, result.?[1]);
 }
 

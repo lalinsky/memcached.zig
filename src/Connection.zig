@@ -25,11 +25,18 @@ pub const GetOpts = Protocol.GetOpts;
 pub const SetOpts = Protocol.SetOpts;
 pub const Error = Protocol.Error;
 
+/// Connects to `host`, an IP address or a name to resolve.
 pub fn connect(self: *Connection, gpa: Allocator, io: std.Io, host: []const u8, port: u16, options: Options) !void {
-    const stream = try (try std.Io.net.HostName.init(host)).connect(io, port, .{
+    const connect_options: std.Io.net.IpAddress.ConnectOptions = .{
         .mode = .stream,
         .timeout = options.connect_timeout,
-    });
+    };
+    // A name, unless it parses as an address: names cannot be IPv6
+    // addresses.
+    const stream = if (std.Io.net.IpAddress.parse(host, port)) |address|
+        try address.connect(io, connect_options)
+    else |_|
+        try (try std.Io.net.HostName.init(host)).connect(io, port, connect_options);
     errdefer stream.close(io);
 
     const read_buffer = try gpa.alloc(u8, options.read_buffer_size);
@@ -117,6 +124,15 @@ test "simple get/set" {
 
     try std.testing.expect(info != null);
     try std.testing.expectEqualStrings("test_value", info.?.value);
+}
+
+test "connect by name" {
+    var conn: Connection = undefined;
+    try conn.connect(std.testing.allocator, std.testing.io, "localhost", testing.node1, .{});
+    defer conn.close();
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expect((try conn.version(&buf)).len > 0);
 }
 
 test "get non-existent key returns null" {
