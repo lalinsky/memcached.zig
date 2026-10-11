@@ -114,10 +114,11 @@ pub fn get(self: Protocol, key: []const u8, buf: []u8, opts: GetOpts) Error!?Inf
     }
 }
 
-/// How many keys `getMulti` sends before reading the responses. All of
-/// them have to fit in the socket buffers, or both ends block writing: the
-/// server on responses nobody reads yet, the client on requests the server
-/// stopped reading.
+/// How many keys `getMulti` sends before reading the responses. The
+/// requests have to fit in the socket buffers: the server stops reading
+/// them while it waits to send responses nobody reads yet, and if the
+/// client is still writing then, both ends wait on each other. A hundred of
+/// the longest keys are about 30KB.
 pub const max_pipelined_keys = 100;
 
 /// Gets many keys in a few round trips: an `mg` for each with `q`, which
@@ -130,8 +131,8 @@ pub const max_pipelined_keys = 100;
 /// fails with `error.ValueTooLarge`, the values that did fit in `results`.
 pub fn getMulti(self: Protocol, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) Error!void {
     std.debug.assert(results.len == keys.len);
-    for (keys) |key| try validateKey(key);
     @memset(results, null);
+    for (keys) |key| try validateKey(key);
 
     var used: usize = 0;
     var too_large = false;

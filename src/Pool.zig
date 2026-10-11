@@ -52,8 +52,9 @@ pub fn acquire(self: *Pool) !*Connection {
     // Try to get an idle connection
     if (self.idle.popFirst()) |node| {
         self.idle_count -= 1;
+        const idle_count = self.idle_count;
         self.mutex.unlock(self.io);
-        log.debug("pool {s}:{d} reusing connection (idle: {d})", .{ self.host, self.port, self.idle_count });
+        log.debug("pool {s}:{d} reusing connection (idle: {d})", .{ self.host, self.port, idle_count });
         return @fieldParentPtr("node", node);
     }
 

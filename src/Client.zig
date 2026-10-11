@@ -169,6 +169,7 @@ pub fn touch(self: *Client, key: []const u8, ttl: u32) !void {
 /// `Connection.getMulti` on the server at `server` in `Options.servers`,
 /// which the keys should all go to, see `serverIndex`.
 pub fn getMultiFrom(self: *Client, server: usize, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) !void {
+    if (keys.len == 0) return;
     return withServer(&self.servers[server], Connection.getMulti, .{ keys, results, buf, opts });
 }
 

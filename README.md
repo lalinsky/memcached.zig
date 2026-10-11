@@ -71,6 +71,9 @@ for (keys, results) |key, result| {
 `serverIndex` and `getMultiFrom` do the same for one server at a time, for
 callers that want to handle each server on their own.
 
+The servers are asked from tasks that may run on other threads, so the
+allocator the client is given has to be thread-safe.
+
 ## Timeouts and cancellation
 
 There are no read or write timeouts and nothing is retried: the caller
