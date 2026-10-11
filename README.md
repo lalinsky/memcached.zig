@@ -53,6 +53,33 @@ var client = try memcached.Client.init(gpa, io, .{
 defer client.deinit();
 ```
 
+## Getting many keys at once
+
+`getMulti` pipelines meta gets (`mg ... q`, ended by `mn`), so a batch takes
+one round trip per server, and the servers are asked at the same time.
+
+```zig
+const keys = [_][]const u8{ "a", "b", "c" };
+var results: [keys.len]?memcached.Client.Info = undefined;
+var buf: [4096]u8 = undefined; // the values go here
+try client.getMulti(&keys, &results, &buf, .{});
+for (keys, results) |key, result| {
+    if (result) |info| std.debug.print("{s} = {s}\n", .{ key, info.value });
+}
+```
+
+`serverIndex` and `getMultiFrom` do the same for one server at a time, for
+callers that want to handle each server on their own.
+
+## Timeouts and cancellation
+
+There are no read or write timeouts and nothing is retried: the caller
+decides how long to wait and what to do about a failure. To bound a call,
+cancel it, for example by running it with `io.concurrent` and canceling the
+future, or with the timeouts of the `std.Io` implementation in use. A
+canceled call returns `error.Canceled`, and a connection it left in the
+middle of a response is closed, never put back in the pool.
+
 ## Installation
 
 Add memcached.zig as a dependency in your `build.zig.zon`:

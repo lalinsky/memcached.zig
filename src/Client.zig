@@ -68,14 +68,18 @@ pub fn deinit(self: *Client) void {
     self.gpa.free(self.servers);
 }
 
-fn pickServer(self: *Client, key: []const u8) *Server {
-    if (self.servers.len == 1) return &self.servers[0];
-
-    const index = switch (self.hasher) {
+/// The index in `Options.servers` of the server `key` goes to. With the
+/// `.none` hasher, the next one in turn.
+pub fn serverIndex(self: *Client, key: []const u8) usize {
+    if (self.servers.len == 1) return 0;
+    return switch (self.hasher) {
         .none => self.round_robin.fetchAdd(1, .monotonic) % self.servers.len,
         else => self.hasher.pick(self.servers, key),
     };
-    return &self.servers[index];
+}
+
+fn pickServer(self: *Client, key: []const u8) *Server {
+    return &self.servers[self.serverIndex(key)];
 }
 
 fn withConnection(self: *Client, key: []const u8, comptime func: anytype, args: anytype) !ReturnType(func) {
@@ -160,6 +164,97 @@ pub fn decr(self: *Client, key: []const u8, delta: u64) !u64 {
 
 pub fn touch(self: *Client, key: []const u8, ttl: u32) !void {
     return self.withConnection(key, Connection.touch, .{ key, ttl });
+}
+
+/// `Connection.getMulti` on the server at `server` in `Options.servers`,
+/// which the keys should all go to, see `serverIndex`.
+pub fn getMultiFrom(self: *Client, server: usize, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) !void {
+    return withServer(&self.servers[server], Connection.getMulti, .{ keys, results, buf, opts });
+}
+
+/// Gets many keys from all the servers they go to at the same time, with
+/// `Connection.getMulti` on each. `results[i]` is the value of `keys[i]`, or
+/// null for a miss. Each server's values go into a part of `buf` as large as
+/// its share of the keys.
+///
+/// A server that fails does not hold up the others. Once they are all done,
+/// the call fails with the error of one that failed, and `results` has what
+/// was read.
+pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) !void {
+    std.debug.assert(results.len == keys.len);
+    if (self.servers.len == 1) return self.getMultiFrom(0, keys, results, buf, opts);
+    @memset(results, null);
+    if (keys.len == 0) return;
+
+    // The keys grouped by server, in a counting sort, with where each came
+    // from.
+    const num_servers = self.servers.len;
+    const server_of = try self.gpa.alloc(usize, keys.len);
+    defer self.gpa.free(server_of);
+    const origin = try self.gpa.alloc(usize, keys.len);
+    defer self.gpa.free(origin);
+    const grouped_keys = try self.gpa.alloc([]const u8, keys.len);
+    defer self.gpa.free(grouped_keys);
+    const grouped_results = try self.gpa.alloc(?Info, keys.len);
+    defer self.gpa.free(grouped_results);
+    @memset(grouped_results, null);
+    const starts = try self.gpa.alloc(usize, num_servers + 1);
+    defer self.gpa.free(starts);
+    const ends = try self.gpa.alloc(usize, num_servers);
+    defer self.gpa.free(ends);
+    const errors = try self.gpa.alloc(?anyerror, num_servers);
+    defer self.gpa.free(errors);
+    @memset(errors, null);
+
+    @memset(starts, 0);
+    for (keys, server_of) |key, *server| {
+        server.* = self.serverIndex(key);
+        starts[server.* + 1] += 1;
+    }
+    for (1..num_servers + 1) |server| starts[server] += starts[server - 1];
+    @memcpy(ends, starts[0..num_servers]);
+    for (keys, server_of, 0..) |key, server, i| {
+        grouped_keys[ends[server]] = key;
+        origin[ends[server]] = i;
+        ends[server] += 1;
+    }
+
+    var group: std.Io.Group = .init;
+    for (0..num_servers) |server| {
+        const from = starts[server];
+        const to = starts[server + 1];
+        if (from == to) continue;
+        group.async(self.io, getMultiTask, .{
+            self,
+            server,
+            grouped_keys[from..to],
+            grouped_results[from..to],
+            buf[from * buf.len / keys.len .. to * buf.len / keys.len],
+            opts,
+            &errors[server],
+        });
+    }
+    try group.await(self.io);
+
+    for (grouped_results, origin) |result, i| results[i] = result;
+    for (errors) |err| {
+        if (err) |e| return e;
+    }
+}
+
+fn getMultiTask(
+    self: *Client,
+    server: usize,
+    keys: []const []const u8,
+    results: []?Info,
+    buf: []u8,
+    opts: GetOpts,
+    err: *?anyerror,
+) std.Io.Cancelable!void {
+    self.getMultiFrom(server, keys, results, buf, opts) catch |e| {
+        if (e == error.Canceled) return error.Canceled;
+        err.* = e;
+    };
 }
 
 // --- Non-key operations ---
@@ -338,6 +433,99 @@ test "a canceled call returns Canceled and leaves no connection in the pool" {
     try std.testing.expectError(error.Canceled, future.cancel(io));
     // The connection is mid-response, so it is closed, not pooled.
     try std.testing.expect(client.servers[0].pool.isEmpty());
+}
+
+test "Client getMulti across servers" {
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+        .servers = &.{ "127.0.0.1:21211", "127.0.0.1:21212", "127.0.0.1:21213" },
+    });
+    defer client.deinit();
+
+    const n = 300;
+    var key_bufs: [n][24]u8 = undefined;
+    var keys: [n][]const u8 = undefined;
+    var on_server = [_]usize{ 0, 0, 0 };
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| {
+        key.* = try std.fmt.bufPrint(key_buf, "client_multi_{d}", .{i});
+        on_server[client.serverIndex(key.*)] += 1;
+        // Every fifth one is a miss.
+        if (i % 5 == 0) {
+            client.delete(key.*) catch {};
+        } else {
+            try client.set(key.*, key.*, .{});
+        }
+    }
+    for (on_server) |count| try std.testing.expect(count > 0);
+
+    var results: [n]?Info = undefined;
+    var buf: [n * 24]u8 = undefined;
+    try client.getMulti(&keys, &results, &buf, .{});
+    for (keys, results, 0..) |key, result, i| {
+        if (i % 5 == 0) {
+            try std.testing.expectEqual(null, result);
+        } else {
+            try std.testing.expectEqualStrings(key, result.?.value);
+        }
+    }
+}
+
+test "Client getMulti gets what it can when a server is down" {
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+        // Nothing listens on port 1.
+        .servers = &.{ "127.0.0.1:21211", "127.0.0.1:21212", "127.0.0.1:1" },
+    });
+    defer client.deinit();
+
+    const n = 60;
+    var key_bufs: [n][24]u8 = undefined;
+    var keys: [n][]const u8 = undefined;
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| {
+        key.* = try std.fmt.bufPrint(key_buf, "partial_multi_{d}", .{i});
+        if (client.serverIndex(key.*) != 2) try client.set(key.*, key.*, .{});
+    }
+
+    var results: [n]?Info = undefined;
+    var buf: [n * 24]u8 = undefined;
+    try std.testing.expectError(error.ConnectionRefused, client.getMulti(&keys, &results, &buf, .{}));
+    for (keys, results) |key, result| {
+        if (client.serverIndex(key) == 2) {
+            try std.testing.expectEqual(null, result);
+        } else {
+            try std.testing.expectEqualStrings(key, result.?.value);
+        }
+    }
+}
+
+test "a canceled Client getMulti leaves no connection mid-response in a pool" {
+    const testing = @import("testing.zig");
+    const io = std.testing.io;
+
+    var silent = try testing.SilentServer.init(io);
+    defer silent.deinit(io);
+    var server_buf: [32]u8 = undefined;
+    const silent_server = try std.fmt.bufPrint(&server_buf, "127.0.0.1:{d}", .{silent.port()});
+
+    var client = try Client.init(std.testing.allocator, io, .{
+        .servers = &.{ "127.0.0.1:21211", silent_server },
+        .max_idle = 1,
+    });
+    defer client.deinit();
+
+    // Keys for both servers.
+    var key_bufs: [20][24]u8 = undefined;
+    var keys: [20][]const u8 = undefined;
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| key.* = try std.fmt.bufPrint(key_buf, "canceled_multi_{d}", .{i});
+
+    var results: [keys.len]?Info = undefined;
+    var buf: [256]u8 = undefined;
+    var future = try io.concurrent(Client.getMulti, .{ &client, &keys, &results, &buf, GetOpts{} });
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+
+    // The server that answered had its connection back in time; the one
+    // that never did had it closed.
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+    try std.testing.expect(client.servers[1].pool.isEmpty());
 }
 
 test "key distribution across servers" {
