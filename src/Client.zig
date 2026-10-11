@@ -18,7 +18,10 @@ round_robin: std.atomic.Value(usize),
 
 pub const Options = struct {
     servers: []const []const u8 = &.{},
-    hasher: Hasher = .none,
+    /// Which server a key goes to. Rendezvous hashing by default; `.none`
+    /// spreads even the same key over all of them, which only suits servers
+    /// that all hold the same data.
+    hasher: Hasher = .rendezvous,
     max_idle: usize = 2,
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
