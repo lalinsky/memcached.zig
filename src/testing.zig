@@ -50,6 +50,25 @@ fn tryConnect(io: std.Io, port: u16) std.Io.Cancelable!bool {
     return true;
 }
 
+/// A server on a free port that never answers: the kernel accepts the
+/// connections and buffers what is sent, and nothing reads it.
+pub const SilentServer = struct {
+    server: std.Io.net.Server,
+
+    pub fn init(io: std.Io) !SilentServer {
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        return .{ .server = try address.listen(io, .{}) };
+    }
+
+    pub fn deinit(self: *SilentServer, io: std.Io) void {
+        self.server.deinit(io);
+    }
+
+    pub fn port(self: SilentServer) u16 {
+        return self.server.socket.address.getPort();
+    }
+};
+
 // --- Test lifecycle hooks ---
 
 test "tests:beforeAll" {

@@ -293,6 +293,48 @@ test "Client connection reused after Exists error (CAS conflict)" {
     try std.testing.expect(!client.servers[0].pool.isEmpty());
 }
 
+test "Client connection reused after a value too large for the buffer" {
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+        .servers = &.{"127.0.0.1:21211"},
+        .max_idle = 1,
+    });
+    defer client.deinit();
+
+    try client.set("large_value_key", "a value longer than the buffer", .{});
+    try client.set("small_value_key", "small", .{});
+
+    var small_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.ValueTooLarge, client.get("large_value_key", &small_buf, .{}));
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+
+    // The connection is past the value it could not take, at the next
+    // response.
+    const info = try client.get("small_value_key", &small_buf, .{});
+    try std.testing.expectEqualStrings("small", info.?.value);
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+}
+
+test "a canceled call returns Canceled and leaves no connection in the pool" {
+    const testing = @import("testing.zig");
+    const io = std.testing.io;
+
+    var silent = try testing.SilentServer.init(io);
+    defer silent.deinit(io);
+    var server_buf: [32]u8 = undefined;
+    const server = try std.fmt.bufPrint(&server_buf, "127.0.0.1:{d}", .{silent.port()});
+
+    var client = try Client.init(std.testing.allocator, io, .{ .servers = &.{server}, .max_idle = 1 });
+    defer client.deinit();
+
+    var buf: [64]u8 = undefined;
+    var future = try io.concurrent(Client.get, .{ &client, "never_answered", &buf, GetOpts{} });
+    // Let it send the request and block on the response.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+    // The connection is mid-response, so it is closed, not pooled.
+    try std.testing.expect(client.servers[0].pool.isEmpty());
+}
+
 test "key distribution across servers" {
     const servers = &[_][]const u8{
         "127.0.0.1:21211",
