@@ -9,6 +9,7 @@ Works with Zig 0.16 and 0.17.
 - Async I/O via std.Io
 - Connection pooling per server
 - Multi-server support with consistent hashing (rendezvous)
+- Pipelined multi-get across servers
 - Meta protocol (mg, ms, md, ma commands)
 - CAS (compare-and-swap) support
 - TTL and flags support
