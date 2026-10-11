@@ -2,6 +2,8 @@
 
 A memcached client library for Zig, built on `std.Io` for async I/O. Uses the modern [meta protocol](https://docs.memcached.org/protocols/meta/) for efficient communication.
 
+Works with Zig 0.16 and 0.17.
+
 ## Features
 
 - Async I/O via std.Io

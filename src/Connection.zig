@@ -128,7 +128,7 @@ const testing = @import("testing.zig");
 
 test "simple get/set" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("test_key", "test_value", .{}, .set);
@@ -142,7 +142,7 @@ test "simple get/set" {
 
 test "get non-existent key returns null" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     var buf: [1024]u8 = undefined;
@@ -153,7 +153,7 @@ test "get non-existent key returns null" {
 
 test "set with TTL and flags" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("ttl_key", "ttl_value", .{ .ttl = 60, .flags = 42 }, .set);
@@ -168,7 +168,7 @@ test "set with TTL and flags" {
 
 test "delete" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("delete_key", "to_be_deleted", .{}, .set);
@@ -181,7 +181,7 @@ test "delete" {
 
 test "incr/decr" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("counter", "10", .{}, .set);
@@ -195,7 +195,7 @@ test "incr/decr" {
 
 test "version" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     var buf: [64]u8 = undefined;
@@ -206,7 +206,7 @@ test "version" {
 
 test "add only if not exists" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     // Delete first to ensure clean state
@@ -226,7 +226,7 @@ test "add only if not exists" {
 
 test "replace only if exists" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     // Delete first to ensure clean state
@@ -248,7 +248,7 @@ test "replace only if exists" {
 
 test "append/prepend" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("concat_key", "hello", .{}, .set);
@@ -267,7 +267,7 @@ test "append/prepend" {
 
 test "CAS (compare and swap)" {
     var conn: Connection = undefined;
-    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", @intFromEnum(testing.Node.node1), .{});
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
     defer conn.close();
 
     try conn.set("cas_key", "original", .{}, .set);

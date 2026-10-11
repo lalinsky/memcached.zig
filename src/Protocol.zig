@@ -373,10 +373,10 @@ test "parseResponse EX" {
 test "validateKey" {
     try validateKey("valid_key");
     try validateKey("a");
-    try validateKey("x" ** 250);
+    try validateKey(&@as([250]u8, @splat('x')));
 
     try std.testing.expectError(error.InvalidKey, validateKey(""));
-    try std.testing.expectError(error.InvalidKey, validateKey("x" ** 251));
+    try std.testing.expectError(error.InvalidKey, validateKey(&@as([251]u8, @splat('x'))));
     try std.testing.expectError(error.InvalidKey, validateKey("has space"));
     try std.testing.expectError(error.InvalidKey, validateKey("has\ttab"));
     try std.testing.expectError(error.InvalidKey, validateKey("has\nnewline"));
