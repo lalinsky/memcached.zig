@@ -1,10 +1,9 @@
 const std = @import("std");
 
-pub const Node = enum(u16) {
-    node1 = 21211,
-    node2 = 21212,
-    node3 = 21213,
-};
+/// The ports of the memcached servers in docker-compose.test.yml.
+pub const node1: u16 = 21211;
+pub const node2: u16 = 21212;
+pub const node3: u16 = 21213;
 
 pub fn runDockerComposeCapture(allocator: std.mem.Allocator, io: std.Io, compose_args: []const []const u8) !std.process.RunResult {
     var args: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -25,16 +24,15 @@ pub fn runDockerCompose(allocator: std.mem.Allocator, io: std.Io, compose_args: 
 }
 
 pub fn waitForServices(io: std.Io, timeout: std.Io.Duration) !void {
-    const nodes = [_]Node{ .node1, .node2, .node3 };
-    for (nodes) |node| {
-        try waitForNode(io, node, timeout);
+    for ([_]u16{ node1, node2, node3 }) |port| {
+        try waitForNode(io, port, timeout);
     }
 }
 
-pub fn waitForNode(io: std.Io, node: Node, timeout: std.Io.Duration) !void {
+pub fn waitForNode(io: std.Io, port: u16, timeout: std.Io.Duration) !void {
     const deadline = std.Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = timeout, .clock = .awake });
     while (true) {
-        if (try tryConnect(io, node)) {
+        if (try tryConnect(io, port)) {
             try io.sleep(.fromMilliseconds(500), .awake);
             return;
         }
@@ -45,8 +43,8 @@ pub fn waitForNode(io: std.Io, node: Node, timeout: std.Io.Duration) !void {
     }
 }
 
-fn tryConnect(io: std.Io, node: Node) std.Io.Cancelable!bool {
-    const addr = std.Io.net.IpAddress.parse("127.0.0.1", @intFromEnum(node)) catch return false;
+fn tryConnect(io: std.Io, port: u16) std.Io.Cancelable!bool {
+    const addr = std.Io.net.IpAddress.parse("127.0.0.1", port) catch return false;
     const stream = addr.connect(io, .{ .mode = .stream }) catch |err| {
         if (err == error.Canceled) return error.Canceled;
         return false;
