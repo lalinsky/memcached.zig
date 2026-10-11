@@ -15,8 +15,6 @@ io: std.Io,
 servers: []Server,
 hasher: Hasher,
 round_robin: std.atomic.Value(usize),
-retry_attempts: usize,
-retry_interval: std.Io.Duration,
 
 pub const Options = struct {
     servers: []const []const u8 = &.{},
@@ -25,8 +23,6 @@ pub const Options = struct {
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
     connect_timeout: std.Io.Timeout = .none,
-    retry_attempts: usize = 2,
-    retry_interval: std.Io.Duration = .zero,
 };
 
 // Re-export types for convenience
@@ -59,8 +55,6 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !Client {
         .servers = servers,
         .hasher = options.hasher,
         .round_robin = std.atomic.Value(usize).init(0),
-        .retry_attempts = options.retry_attempts,
-        .retry_interval = options.retry_interval,
     };
 }
 
@@ -82,58 +76,31 @@ fn pickServer(self: *Client, key: []const u8) *Server {
 }
 
 fn withConnection(self: *Client, key: []const u8, comptime func: anytype, args: anytype) !ReturnType(func) {
-    return self.withServer(self.pickServer(key), func, args);
+    return withServer(self.pickServer(key), func, args);
 }
 
 fn withAnyConnection(self: *Client, comptime func: anytype, args: anytype) !ReturnType(func) {
     const index = self.round_robin.fetchAdd(1, .monotonic) % self.servers.len;
-    return self.withServer(&self.servers[index], func, args);
+    return withServer(&self.servers[index], func, args);
 }
 
-fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anytype) !ReturnType(func) {
-    var attempts: usize = 0;
-    while (true) {
-        log.debug("{s}:{d} attempt {d}", .{ server.host, server.port, attempts });
-        const conn = server.pool.acquire() catch |err| {
-            if (attempts < self.retry_attempts) {
-                attempts += 1;
-                log.debug("{s}:{d} acquire failed: {}, retry {d}/{d}", .{
-                    server.host,
-                    server.port,
-                    err,
-                    attempts,
-                    self.retry_attempts,
-                });
-                try self.io.sleep(self.retry_interval, .awake);
-                continue;
-            }
-            return err;
-        };
-        var ok = false;
-        defer server.pool.release(conn, ok);
+/// Runs `func` on a connection from the server's pool. A connection that
+/// failed in a way that may have left it mid-response is closed rather than
+/// returned to the pool, so a canceled call never leaves one behind for the
+/// next caller. Nothing is retried: a connection that went stale while
+/// idle, as after a server restart, fails the one call that picks it up.
+fn withServer(server: *Server, comptime func: anytype, args: anytype) !ReturnType(func) {
+    const conn = try server.pool.acquire();
+    var ok = false;
+    defer server.pool.release(conn, ok);
 
-        log.debug("{s}:{d} calling operation", .{ server.host, server.port });
-        const result = @call(.auto, func, .{conn} ++ args) catch |err| {
-            log.debug("{s}:{d} operation error: {}", .{ server.host, server.port, err });
-            ok = Protocol.isResumable(err);
-            if (!ok and attempts < self.retry_attempts) {
-                attempts += 1;
-                log.debug("{s}:{d} operation failed: {}, retry {d}/{d}", .{
-                    server.host,
-                    server.port,
-                    err,
-                    attempts,
-                    self.retry_attempts,
-                });
-                try self.io.sleep(self.retry_interval, .awake);
-                continue;
-            }
-            return err;
-        };
-        log.debug("{s}:{d} operation success", .{ server.host, server.port });
-        ok = true;
-        return result;
-    }
+    const result = @call(.auto, func, .{conn} ++ args) catch |err| {
+        log.debug("{s}:{d} operation error: {}", .{ server.host, server.port, err });
+        ok = Protocol.isResumable(err);
+        return err;
+    };
+    ok = true;
+    return result;
 }
 
 fn ReturnType(comptime func: anytype) type {
@@ -383,39 +350,30 @@ test "key distribution across servers" {
     try std.testing.expectEqual(num_keys, total);
 }
 
-test "retry after server restart" {
+test "a connection gone stale in the pool fails one call, not the next" {
     const testing = @import("testing.zig");
+    const io = std.testing.io;
 
-    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+    var client = try Client.init(std.testing.allocator, io, .{
         .servers = &.{"127.0.0.1:21211"},
-        .retry_attempts = 5,
-        .retry_interval = .fromMilliseconds(500),
+        .max_idle = 1,
     });
     defer client.deinit();
 
-    // Set a key
-    try client.set("retry_test_key", "before_restart", .{});
+    try client.set("restart_test_key", "before_restart", .{});
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
 
-    // Verify it's there
+    try testing.runDockerCompose(std.testing.allocator, io, &.{ "restart", "-t", "0", "memcached-1" });
+    try testing.waitForNode(io, testing.node1, .fromSeconds(30));
+
+    // The pooled connection is to the server that went away. Using it
+    // fails, and it is closed rather than put back.
     var buf: [1024]u8 = undefined;
-    const info1 = try client.get("retry_test_key", &buf, .{});
-    try std.testing.expectEqualStrings("before_restart", info1.?.value);
+    if (client.get("restart_test_key", &buf, .{})) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try std.testing.expect(client.servers[0].pool.isEmpty());
 
-    // Stop immediately (no grace period)
-    try testing.runDockerCompose(std.testing.allocator, std.testing.io, &.{ "stop", "-t", "0", "memcached-1" });
-
-    // Start in background - will take time to be ready
-    var start_thread = try std.Thread.spawn(.{}, struct {
-        fn run() void {
-            testing.runDockerCompose(std.testing.allocator, std.testing.io, &.{ "start", "memcached-1" }) catch {};
-        }
-    }.run, .{});
-
-    // Try immediately with stale connection - should fail and retry
-    try client.set("retry_test_key", "after_restart", .{});
-
-    start_thread.join();
-
-    const info2 = try client.get("retry_test_key", &buf, .{});
-    try std.testing.expectEqualStrings("after_restart", info2.?.value);
+    // A new one works; the restart emptied the cache.
+    try std.testing.expectEqual(null, try client.get("restart_test_key", &buf, .{}));
 }
