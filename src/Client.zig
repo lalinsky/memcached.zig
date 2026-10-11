@@ -99,7 +99,7 @@ fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anyt
     while (true) {
         log.debug("{s}:{d} attempt {d}", .{ server.host, server.port, attempts });
         const conn = server.pool.acquire() catch |err| {
-            if (attempts < self.retry_attempts) {
+            if (err != error.Canceled and attempts < self.retry_attempts) {
                 attempts += 1;
                 log.debug("{s}:{d} acquire failed: {}, retry {d}/{d}", .{
                     server.host,
@@ -120,7 +120,7 @@ fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anyt
         const result = @call(.auto, func, .{conn} ++ args) catch |err| {
             log.debug("{s}:{d} operation error: {}", .{ server.host, server.port, err });
             ok = Protocol.isResumable(err);
-            if (!ok and attempts < self.retry_attempts) {
+            if (!ok and err != error.Canceled and attempts < self.retry_attempts) {
                 attempts += 1;
                 log.debug("{s}:{d} operation failed: {}, retry {d}/{d}", .{
                     server.host,
@@ -330,6 +330,30 @@ test "Client connection reused after Exists error (CAS conflict)" {
 
     // Verify connection was reused
     try std.testing.expect(!client.servers[0].pool.isEmpty());
+}
+
+test "a canceled call returns Canceled, is not retried, and leaves no connection in the pool" {
+    const io = std.testing.io;
+
+    var silent = try testing.SilentServer.init(io);
+    defer silent.deinit(io);
+    var server_buf: [32]u8 = undefined;
+    const server = try std.fmt.bufPrint(&server_buf, "127.0.0.1:{d}", .{silent.port()});
+
+    var client = try Client.init(std.testing.allocator, io, .{
+        .servers = &.{server},
+        .max_idle = 1,
+        .retry_attempts = 2,
+    });
+    defer client.deinit();
+
+    var buf: [64]u8 = undefined;
+    var future = try io.concurrent(Client.get, .{ &client, "never_answered", &buf, GetOpts{} });
+    // Let it send the request and block on the response.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+    // The connection is mid-response, so it is closed, not pooled.
+    try std.testing.expect(client.servers[0].pool.isEmpty());
 }
 
 test "key distribution across servers" {
