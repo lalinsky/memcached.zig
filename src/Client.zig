@@ -1,5 +1,4 @@
 const std = @import("std");
-const zio = @import("zio");
 const Allocator = std.mem.Allocator;
 const Connection = @import("Connection.zig");
 const Pool = @import("Pool.zig");
@@ -12,11 +11,12 @@ const log = std.log.scoped(.memcached);
 const Client = @This();
 
 gpa: Allocator,
+io: std.Io,
 servers: []Server,
 hasher: Hasher,
 round_robin: std.atomic.Value(usize),
 retry_attempts: usize,
-retry_interval: zio.Duration,
+retry_interval: std.Io.Duration,
 
 pub const Options = struct {
     servers: []const []const u8 = &.{},
@@ -24,11 +24,9 @@ pub const Options = struct {
     max_idle: usize = 2,
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
-    connect_timeout: zio.Timeout = .none,
-    read_timeout: zio.Timeout = .none,
-    write_timeout: zio.Timeout = .none,
+    connect_timeout: std.Io.Timeout = .none,
     retry_attempts: usize = 2,
-    retry_interval: zio.Duration = .zero,
+    retry_interval: std.Io.Duration = .zero,
 };
 
 // Re-export types for convenience
@@ -37,7 +35,7 @@ pub const GetOpts = Connection.GetOpts;
 pub const SetOpts = Connection.SetOpts;
 pub const Error = Connection.Error;
 
-pub fn init(gpa: Allocator, options: Options) !Client {
+pub fn init(gpa: Allocator, io: std.Io, options: Options) !Client {
     if (options.servers.len == 0) return error.NoServers;
 
     const servers = try gpa.alloc(Server, options.servers.len);
@@ -48,17 +46,16 @@ pub fn init(gpa: Allocator, options: Options) !Client {
         .read_buffer_size = options.read_buffer_size,
         .write_buffer_size = options.write_buffer_size,
         .connect_timeout = options.connect_timeout,
-        .read_timeout = options.read_timeout,
-        .write_timeout = options.write_timeout,
     };
 
     for (options.servers, 0..) |server_str, i| {
         const host, const port = parseServer(server_str) orelse return error.InvalidServer;
-        servers[i] = Server.init(gpa, host, port, pool_opts);
+        servers[i] = Server.init(gpa, io, host, port, pool_opts);
     }
 
     return .{
         .gpa = gpa,
+        .io = io,
         .servers = servers,
         .hasher = options.hasher,
         .round_robin = std.atomic.Value(usize).init(0),
@@ -107,7 +104,7 @@ fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anyt
                     attempts,
                     self.retry_attempts,
                 });
-                try zio.sleep(self.retry_interval);
+                try self.io.sleep(self.retry_interval, .awake);
                 continue;
             }
             return err;
@@ -128,7 +125,7 @@ fn withServer(self: *Client, server: *Server, comptime func: anytype, args: anyt
                     attempts,
                     self.retry_attempts,
                 });
-                try zio.sleep(self.retry_interval);
+                try self.io.sleep(self.retry_interval, .awake);
                 continue;
             }
             return err;
@@ -222,7 +219,7 @@ test "parseServer ipv6" {
 }
 
 test "Client get/set" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
     });
     defer client.deinit();
@@ -237,7 +234,7 @@ test "Client get/set" {
 }
 
 test "Client get non-existent returns null" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
     });
     defer client.deinit();
@@ -249,7 +246,7 @@ test "Client get non-existent returns null" {
 }
 
 test "Client incr/decr" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
     });
     defer client.deinit();
@@ -264,7 +261,7 @@ test "Client incr/decr" {
 }
 
 test "Client delete" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
     });
     defer client.deinit();
@@ -278,7 +275,7 @@ test "Client delete" {
 }
 
 test "Client connection reused after NotStored error" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
         .max_idle = 1,
     });
@@ -303,7 +300,7 @@ test "Client connection reused after NotStored error" {
 }
 
 test "Client connection reused after Exists error (CAS conflict)" {
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
         .max_idle = 1,
     });
@@ -337,7 +334,7 @@ test "key distribution across servers" {
     };
 
     // Create distributed client
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = servers,
         .hasher = .rendezvous,
     });
@@ -358,7 +355,7 @@ test "key distribution across servers" {
         const host, const port = parseServer(server_str).?;
 
         var conn: Connection = undefined;
-        try conn.connect(std.testing.allocator, host, port, .{});
+        try conn.connect(std.testing.allocator, std.testing.io, host, port, .{});
         defer conn.close();
 
         var buf: [1024]u8 = undefined;
@@ -389,7 +386,7 @@ test "key distribution across servers" {
 test "retry after server restart" {
     const testing = @import("testing.zig");
 
-    var client = try Client.init(std.testing.allocator, .{
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
         .servers = &.{"127.0.0.1:21211"},
         .retry_attempts = 5,
         .retry_interval = .fromMilliseconds(500),
@@ -405,12 +402,12 @@ test "retry after server restart" {
     try std.testing.expectEqualStrings("before_restart", info1.?.value);
 
     // Stop immediately (no grace period)
-    try testing.runDockerCompose(std.testing.allocator, &.{ "stop", "-t", "0", "memcached-1" });
+    try testing.runDockerCompose(std.testing.allocator, std.testing.io, &.{ "stop", "-t", "0", "memcached-1" });
 
     // Start in background - will take time to be ready
     var start_thread = try std.Thread.spawn(.{}, struct {
         fn run() void {
-            testing.runDockerCompose(std.testing.allocator, &.{ "start", "memcached-1" }) catch {};
+            testing.runDockerCompose(std.testing.allocator, std.testing.io, &.{ "start", "memcached-1" }) catch {};
         }
     }.run, .{});
 

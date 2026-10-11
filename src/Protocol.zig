@@ -231,7 +231,7 @@ pub fn flushAll(self: Protocol) Error!void {
     try self.writer.flush();
 
     const line = try self.reader.takeDelimiterInclusive('\n');
-    const trimmed = std.mem.trimRight(u8, line, "\r\n");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
 
     if (!std.mem.eql(u8, trimmed, "OK")) {
         return error.ServerError;
@@ -243,7 +243,7 @@ pub fn version(self: Protocol, buf: []u8) Error![]u8 {
     try self.writer.flush();
 
     const line = try self.reader.takeDelimiterInclusive('\n');
-    const trimmed = std.mem.trimRight(u8, line, "\r\n");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
 
     if (std.mem.startsWith(u8, trimmed, "VERSION ")) {
         const ver = trimmed[8..];
@@ -278,7 +278,7 @@ const ValueInfo = struct {
 
 fn readResponse(self: Protocol) Error!Response {
     const line = try self.reader.takeDelimiterInclusive('\n');
-    const trimmed = std.mem.trimRight(u8, line, "\r\n");
+    const trimmed = std.mem.trimEnd(u8, line, "\r\n");
     return parseResponse(trimmed);
 }
 
@@ -373,10 +373,10 @@ test "parseResponse EX" {
 test "validateKey" {
     try validateKey("valid_key");
     try validateKey("a");
-    try validateKey("x" ** 250);
+    try validateKey(&@as([250]u8, @splat('x')));
 
     try std.testing.expectError(error.InvalidKey, validateKey(""));
-    try std.testing.expectError(error.InvalidKey, validateKey("x" ** 251));
+    try std.testing.expectError(error.InvalidKey, validateKey(&@as([251]u8, @splat('x'))));
     try std.testing.expectError(error.InvalidKey, validateKey("has space"));
     try std.testing.expectError(error.InvalidKey, validateKey("has\ttab"));
     try std.testing.expectError(error.InvalidKey, validateKey("has\nnewline"));
