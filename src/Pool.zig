@@ -20,7 +20,6 @@ pub const Options = struct {
     max_idle: usize = 2,
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
-    connect_timeout: std.Io.Timeout = .none,
 };
 
 pub fn init(gpa: Allocator, io: std.Io, host: []const u8, port: u16, options: Options) Pool {
@@ -33,7 +32,6 @@ pub fn init(gpa: Allocator, io: std.Io, host: []const u8, port: u16, options: Op
         .connection_options = .{
             .read_buffer_size = options.read_buffer_size,
             .write_buffer_size = options.write_buffer_size,
-            .connect_timeout = options.connect_timeout,
         },
     };
 }

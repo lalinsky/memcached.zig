@@ -25,7 +25,6 @@ pub const Options = struct {
     max_idle: usize = 2,
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
-    connect_timeout: std.Io.Timeout = .none,
 };
 
 // Re-export types for convenience
@@ -44,7 +43,6 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !Client {
         .max_idle = options.max_idle,
         .read_buffer_size = options.read_buffer_size,
         .write_buffer_size = options.write_buffer_size,
-        .connect_timeout = options.connect_timeout,
     };
 
     for (options.servers, 0..) |server_str, i| {

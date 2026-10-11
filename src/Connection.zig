@@ -16,7 +16,6 @@ write_buffer: []u8,
 pub const Options = struct {
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
-    connect_timeout: std.Io.Timeout = .none,
 };
 
 // Re-export Protocol types for convenience
@@ -27,10 +26,7 @@ pub const Error = Protocol.Error;
 
 /// Connects to `host`, an IP address or a name to resolve.
 pub fn connect(self: *Connection, gpa: Allocator, io: std.Io, host: []const u8, port: u16, options: Options) !void {
-    const connect_options: std.Io.net.IpAddress.ConnectOptions = .{
-        .mode = .stream,
-        .timeout = options.connect_timeout,
-    };
+    const connect_options: std.Io.net.IpAddress.ConnectOptions = .{ .mode = .stream };
     // A name, unless it parses as an address: names cannot be IPv6
     // addresses.
     const stream = if (std.Io.net.IpAddress.parse(host, port)) |address|
