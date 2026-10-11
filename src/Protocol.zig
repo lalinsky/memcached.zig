@@ -114,6 +114,74 @@ pub fn get(self: Protocol, key: []const u8, buf: []u8, opts: GetOpts) Error!?Inf
     }
 }
 
+/// How many keys `getMulti` sends before reading the responses. All of
+/// them have to fit in the socket buffers, or both ends block writing: the
+/// server on responses nobody reads yet, the client on requests the server
+/// stopped reading.
+pub const max_pipelined_keys = 100;
+
+/// Gets many keys in a few round trips: an `mg` for each with `q`, which
+/// leaves misses out of the response, and `O` with the key's index to match
+/// the hits up, then an `mn`, whose `MN` ends the response.
+///
+/// The values go one after another into `buf`. `results[i]` is the value of
+/// `keys[i]`, or null for a miss. A value that does not fit in what is left
+/// of `buf` is read past, and once the whole response is read the call
+/// fails with `error.ValueTooLarge`, the values that did fit in `results`.
+pub fn getMulti(self: Protocol, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) Error!void {
+    std.debug.assert(results.len == keys.len);
+    for (keys) |key| try validateKey(key);
+    @memset(results, null);
+
+    var used: usize = 0;
+    var too_large = false;
+    var start: usize = 0;
+    while (start < keys.len) {
+        const end = @min(keys.len, start + max_pipelined_keys);
+        for (keys[start..end], start..) |key, i| {
+            try self.writer.print("mg {s} v f c q O{d}", .{ key, i });
+            if (opts.ttl) |ttl| {
+                try self.writer.print(" T{d}", .{ttl});
+            }
+            try self.writer.writeAll("\r\n");
+        }
+        try self.writer.writeAll("mn\r\n");
+        try self.writer.flush();
+
+        while (true) {
+            const line = try self.reader.takeDelimiterInclusive('\n');
+            const trimmed = std.mem.trimEnd(u8, line, "\r\n");
+            if (std.mem.eql(u8, trimmed, "MN")) break;
+            switch (try parseResponse(trimmed)) {
+                .value => |info| {
+                    const index = info.opaque_index orelse return error.ServerError;
+                    if (index < start or index >= end or results[index] != null) return error.ServerError;
+                    if (info.size > buf.len - used) {
+                        try self.reader.discardAll(info.size);
+                        _ = try self.reader.takeDelimiterInclusive('\n');
+                        too_large = true;
+                        continue;
+                    }
+                    const value = buf[used..][0..info.size];
+                    try self.reader.readSliceAll(value);
+                    _ = try self.reader.takeDelimiterInclusive('\n');
+                    used += info.size;
+                    results[index] = .{
+                        .value = value,
+                        .flags = info.flags orelse 0,
+                        .cas = info.cas orelse 0,
+                    };
+                },
+                // `q` leaves misses out, but one costs nothing to skip.
+                .not_found => {},
+                else => return error.ServerError,
+            }
+        }
+        start = end;
+    }
+    if (too_large) return error.ValueTooLarge;
+}
+
 // --- Set ---
 
 pub fn set(self: Protocol, key: []const u8, value: []const u8, opts: SetOpts, mode: SetMode) Error!void {
@@ -281,6 +349,8 @@ const ValueInfo = struct {
     size: usize,
     flags: ?u32 = null,
     cas: ?u64 = null,
+    /// The `O` token, when it is a number, as `getMulti` sends.
+    opaque_index: ?usize = null,
 };
 
 fn readResponse(self: Protocol) Error!Response {
@@ -323,6 +393,7 @@ fn parseValueResponse(rest: []const u8) Error!Response {
         switch (flag[0]) {
             'f' => info.flags = std.fmt.parseInt(u32, flag[1..], 10) catch null,
             'c' => info.cas = std.fmt.parseInt(u64, flag[1..], 10) catch null,
+            'O' => info.opaque_index = std.fmt.parseInt(usize, flag[1..], 10) catch null,
             else => {},
         }
     }
@@ -354,6 +425,16 @@ test "parseResponse VA" {
         .size = 5,
         .flags = 123,
         .cas = 456789,
+    } }, resp);
+}
+
+test "parseResponse VA with an opaque token" {
+    const resp = try parseResponse("VA 3 f0 c12 O42");
+    try std.testing.expectEqual(Response{ .value = .{
+        .size = 3,
+        .flags = 0,
+        .cas = 12,
+        .opaque_index = 42,
     } }, resp);
 }
 

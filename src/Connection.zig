@@ -80,6 +80,10 @@ pub fn get(self: *Connection, key: []const u8, buf: []u8, opts: GetOpts) !?Info 
     return self.call(Protocol.get, .{ key, buf, opts });
 }
 
+pub fn getMulti(self: *Connection, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) !void {
+    return self.call(Protocol.getMulti, .{ keys, results, buf, opts });
+}
+
 pub fn set(self: *Connection, key: []const u8, value: []const u8, opts: SetOpts, mode: Protocol.SetMode) !void {
     return self.call(Protocol.set, .{ key, value, opts, mode });
 }
@@ -133,6 +137,82 @@ test "connect by name" {
 
     var buf: [64]u8 = undefined;
     try std.testing.expect((try conn.version(&buf)).len > 0);
+}
+
+test "getMulti" {
+    var conn: Connection = undefined;
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
+    defer conn.close();
+
+    try conn.set("multi_a", "alpha", .{ .flags = 7 }, .set);
+    try conn.set("multi_b", "", .{}, .set);
+    try conn.set("multi_c", "gamma", .{}, .set);
+    conn.delete("multi_missing") catch {};
+
+    // Misses, an empty value, and the same key twice, in any order.
+    const keys = [_][]const u8{ "multi_c", "multi_missing", "multi_a", "multi_b", "multi_a" };
+    var results: [keys.len]?Info = undefined;
+    var buf: [64]u8 = undefined;
+    try conn.getMulti(&keys, &results, &buf, .{});
+
+    try std.testing.expectEqualStrings("gamma", results[0].?.value);
+    try std.testing.expectEqual(null, results[1]);
+    try std.testing.expectEqualStrings("alpha", results[2].?.value);
+    try std.testing.expectEqual(7, results[2].?.flags);
+    try std.testing.expectEqualStrings("", results[3].?.value);
+    try std.testing.expectEqualStrings("alpha", results[4].?.value);
+}
+
+test "getMulti with more keys than go in one round trip" {
+    var conn: Connection = undefined;
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
+    defer conn.close();
+
+    const n = Protocol.max_pipelined_keys * 2 + 50;
+    var key_bufs: [n][16]u8 = undefined;
+    var keys: [n][]const u8 = undefined;
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| {
+        key.* = try std.fmt.bufPrint(key_buf, "many_{d}", .{i});
+        // Every third one is a miss.
+        if (i % 3 == 0) {
+            conn.delete(key.*) catch {};
+        } else {
+            try conn.set(key.*, key.*, .{}, .set);
+        }
+    }
+
+    var results: [n]?Info = undefined;
+    var buf: [n * 16]u8 = undefined;
+    try conn.getMulti(&keys, &results, &buf, .{});
+    for (keys, results, 0..) |key, result, i| {
+        if (i % 3 == 0) {
+            try std.testing.expectEqual(null, result);
+        } else {
+            try std.testing.expectEqualStrings(key, result.?.value);
+        }
+    }
+}
+
+test "getMulti reads past values that do not fit and stays usable" {
+    var conn: Connection = undefined;
+    try conn.connect(std.testing.allocator, std.testing.io, "127.0.0.1", testing.node1, .{});
+    defer conn.close();
+
+    try conn.set("fit_1", "12345", .{}, .set);
+    try conn.set("fit_2", "a much longer value", .{}, .set);
+    try conn.set("fit_3", "123", .{}, .set);
+
+    const keys = [_][]const u8{ "fit_1", "fit_2", "fit_3" };
+    var results: [keys.len]?Info = undefined;
+    var buf: [10]u8 = undefined;
+    try std.testing.expectError(error.ValueTooLarge, conn.getMulti(&keys, &results, &buf, .{}));
+    try std.testing.expectEqualStrings("12345", results[0].?.value);
+    try std.testing.expectEqual(null, results[1]);
+    try std.testing.expectEqualStrings("123", results[2].?.value);
+
+    // The whole response was read, so the next call gets its own.
+    var get_buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("a much longer value", (try conn.get("fit_2", &get_buf, .{})).?.value);
 }
 
 test "get non-existent key returns null" {
