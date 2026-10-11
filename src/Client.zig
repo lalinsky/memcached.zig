@@ -179,8 +179,9 @@ pub fn getMultiFrom(self: *Client, server: usize, keys: []const []const u8, resu
 ///
 /// A server that fails does not hold up the others. Once they are all done,
 /// the call fails with the error of one that failed, and `results` has what
-/// was read.
-pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) !void {
+/// was read, so null is a miss or a key on a server that failed. The same
+/// goes for a canceled call, which fails with `error.Canceled`.
+pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: []u8, opts: GetOpts) (GetMultiFromError || Allocator.Error)!void {
     std.debug.assert(results.len == keys.len);
     if (self.servers.len == 1) return self.getMultiFrom(0, keys, results, buf, opts);
     @memset(results, null);
@@ -202,7 +203,7 @@ pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: 
     defer self.gpa.free(starts);
     const ends = try self.gpa.alloc(usize, num_servers);
     defer self.gpa.free(ends);
-    const errors = try self.gpa.alloc(?anyerror, num_servers);
+    const errors = try self.gpa.alloc(?GetMultiFromError, num_servers);
     defer self.gpa.free(errors);
     @memset(errors, null);
 
@@ -219,6 +220,11 @@ pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: 
         ends[server] += 1;
     }
 
+    // A group may run a task right away on this task, which then takes a
+    // cancel meant for this call, and the group drops the `error.Canceled`
+    // it returns. So the tasks report it here, and once one has taken it,
+    // no more are started.
+    var canceled: std.atomic.Value(bool) = .init(false);
     var group: std.Io.Group = .init;
     for (0..num_servers) |server| {
         const from = starts[server];
@@ -229,17 +235,31 @@ pub fn getMulti(self: *Client, keys: []const []const u8, results: []?Info, buf: 
             server,
             grouped_keys[from..to],
             grouped_results[from..to],
-            buf[from * buf.len / keys.len .. to * buf.len / keys.len],
+            buf[bufShare(buf.len, from, keys.len)..bufShare(buf.len, to, keys.len)],
             opts,
             &errors[server],
+            &canceled,
         });
+        if (canceled.load(.acquire)) break;
     }
-    try group.await(self.io);
+    const awaited = if (canceled.load(.acquire)) blk: {
+        group.cancel(self.io);
+        break :blk error.Canceled;
+    } else group.await(self.io);
 
     for (grouped_results, origin) |result, i| results[i] = result;
+    try awaited;
+    if (canceled.load(.acquire)) return error.Canceled;
     for (errors) |err| {
         if (err) |e| return e;
     }
+}
+
+const GetMultiFromError = @typeInfo(@typeInfo(@TypeOf(getMultiFrom)).@"fn".return_type.?).error_union.error_set;
+
+/// Where the share of `len` for the keys before `index` of `count` ends.
+fn bufShare(len: usize, index: usize, count: usize) usize {
+    return @intCast(@as(u128, len) * index / count);
 }
 
 fn getMultiTask(
@@ -249,11 +269,12 @@ fn getMultiTask(
     results: []?Info,
     buf: []u8,
     opts: GetOpts,
-    err: *?anyerror,
-) std.Io.Cancelable!void {
+    err: *?GetMultiFromError,
+    canceled: *std.atomic.Value(bool),
+) void {
     self.getMultiFrom(server, keys, results, buf, opts) catch |e| {
-        if (e == error.Canceled) return error.Canceled;
         err.* = e;
+        if (e == error.Canceled) canceled.store(true, .release);
     };
 }
 
@@ -519,13 +540,86 @@ test "a canceled Client getMulti leaves no connection mid-response in a pool" {
     var results: [keys.len]?Info = undefined;
     var buf: [256]u8 = undefined;
     var future = try io.concurrent(Client.getMulti, .{ &client, &keys, &results, &buf, GetOpts{} });
-    try io.sleep(.fromMilliseconds(100), .awake);
+    // Until the server that answers is done, and its connection is back.
+    try waitUntilPooled(io, &client.servers[0]);
     try std.testing.expectError(error.Canceled, future.cancel(io));
 
-    // The server that answered had its connection back in time; the one
-    // that never did had it closed.
-    try std.testing.expect(!client.servers[0].pool.isEmpty());
+    // The one that never answered had its connection closed.
     try std.testing.expect(client.servers[1].pool.isEmpty());
+}
+
+test "a canceled Client getMulti fails with Canceled when its tasks run on the caller" {
+    const testing = @import("testing.zig");
+
+    // With one task allowed to run apart, and the getMulti being that one,
+    // the group runs each server's task on it.
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .limited(1) });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var silent = try testing.SilentServer.init(io);
+    defer silent.deinit(io);
+    var server_buf: [32]u8 = undefined;
+    const silent_server = try std.fmt.bufPrint(&server_buf, "127.0.0.1:{d}", .{silent.port()});
+
+    // The silent server first, so the cancel lands in its task, and the
+    // other one has to be skipped.
+    var client = try Client.init(std.testing.allocator, io, .{
+        .servers = &.{ silent_server, "127.0.0.1:21211" },
+    });
+    defer client.deinit();
+
+    var key_bufs: [20][24]u8 = undefined;
+    var keys: [20][]const u8 = undefined;
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| key.* = try std.fmt.bufPrint(key_buf, "inline_multi_{d}", .{i});
+
+    var results: [keys.len]?Info = undefined;
+    var buf: [256]u8 = undefined;
+    var future = try io.concurrent(Client.getMulti, .{ &client, &keys, &results, &buf, GetOpts{} });
+    try io.sleep(.fromMilliseconds(50), .awake);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+}
+
+test "a canceled Client getMulti does not go on to a server after the cancel was taken" {
+    const testing = @import("testing.zig");
+
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .limited(1) });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Two servers that never answer, the tasks for both run on the caller:
+    // the first takes the cancel, and the second would wait forever.
+    var silent_1 = try testing.SilentServer.init(io);
+    defer silent_1.deinit(io);
+    var silent_2 = try testing.SilentServer.init(io);
+    defer silent_2.deinit(io);
+    var server_bufs: [2][32]u8 = undefined;
+    var client = try Client.init(std.testing.allocator, io, .{ .servers = &.{
+        try std.fmt.bufPrint(&server_bufs[0], "127.0.0.1:{d}", .{silent_1.port()}),
+        try std.fmt.bufPrint(&server_bufs[1], "127.0.0.1:{d}", .{silent_2.port()}),
+    } });
+    defer client.deinit();
+
+    var key_bufs: [20][24]u8 = undefined;
+    var keys: [20][]const u8 = undefined;
+    for (&keys, &key_bufs, 0..) |*key, *key_buf, i| key.* = try std.fmt.bufPrint(key_buf, "skipped_multi_{d}", .{i});
+    var on_server = [_]usize{ 0, 0 };
+    for (keys) |key| on_server[client.serverIndex(key)] += 1;
+    try std.testing.expect(on_server[0] > 0 and on_server[1] > 0);
+
+    var results: [keys.len]?Info = undefined;
+    var buf: [256]u8 = undefined;
+    var future = try io.concurrent(Client.getMulti, .{ &client, &keys, &results, &buf, GetOpts{} });
+    try io.sleep(.fromMilliseconds(50), .awake);
+    try std.testing.expectError(error.Canceled, future.cancel(io));
+}
+
+fn waitUntilPooled(io: std.Io, server: *Server) !void {
+    for (0..500) |_| {
+        if (!server.pool.isEmpty()) return;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    return error.Timeout;
 }
 
 test "key distribution across servers" {
