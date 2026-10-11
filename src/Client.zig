@@ -332,6 +332,29 @@ test "Client connection reused after Exists error (CAS conflict)" {
     try std.testing.expect(!client.servers[0].pool.isEmpty());
 }
 
+test "Client connection reused after a value too large for the buffer" {
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+        .servers = &.{"127.0.0.1:21211"},
+        .max_idle = 1,
+        // A retry would cover for a connection left mid-response.
+        .retry_attempts = 0,
+    });
+    defer client.deinit();
+
+    try client.set("large_value_key", "a value longer than the buffer", .{});
+    try client.set("small_value_key", "small", .{});
+
+    var small_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.ValueTooLarge, client.get("large_value_key", &small_buf, .{}));
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+
+    // The connection is past the value it could not take, at the next
+    // response.
+    const info = try client.get("small_value_key", &small_buf, .{});
+    try std.testing.expectEqualStrings("small", info.?.value);
+    try std.testing.expect(!client.servers[0].pool.isEmpty());
+}
+
 test "key distribution across servers" {
     const servers = &[_][]const u8{
         "127.0.0.1:21211",
