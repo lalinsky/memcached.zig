@@ -20,7 +20,10 @@ retry_interval: std.Io.Duration,
 
 pub const Options = struct {
     servers: []const []const u8 = &.{},
-    hasher: Hasher = .none,
+    /// Which server a key goes to. Rendezvous hashing by default; `.none`
+    /// spreads even the same key over all of them, which only suits servers
+    /// that all hold the same data.
+    hasher: Hasher = .rendezvous,
     max_idle: usize = 2,
     read_buffer_size: usize = 4096,
     write_buffer_size: usize = 4096,
@@ -423,4 +426,19 @@ test "retry after server restart" {
 
     const info2 = try client.get("retry_test_key", &buf, .{});
     try std.testing.expectEqualStrings("after_restart", info2.?.value);
+}
+
+test "with default options, a key is looked up where it was set" {
+    var client = try Client.init(std.testing.allocator, std.testing.io, .{
+        .servers = &.{ "127.0.0.1:21211", "127.0.0.1:21212", "127.0.0.1:21213" },
+    });
+    defer client.deinit();
+
+    var key_buf: [32]u8 = undefined;
+    var buf: [16]u8 = undefined;
+    for (0..20) |i| {
+        const key = try std.fmt.bufPrint(&key_buf, "default_hasher_{d}", .{i});
+        try client.set(key, "value", .{});
+        try std.testing.expect(try client.get(key, &buf, .{}) != null);
+    }
 }
