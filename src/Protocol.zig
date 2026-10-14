@@ -32,7 +32,8 @@ pub const Error = error{
 } || std.Io.Reader.Error || std.Io.Reader.DelimiterError || std.Io.Writer.Error;
 
 /// Returns true if the error is a protocol-level error where the connection
-/// is still valid and can be reused.
+/// is still valid and can be reused: the whole response has been read, or
+/// nothing was sent.
 pub fn isResumable(err: anyerror) bool {
     return switch (err) {
         error.NotStored,
@@ -91,7 +92,13 @@ pub fn get(self: Protocol, key: []const u8, buf: []u8, opts: GetOpts) Error!?Inf
 
     switch (response) {
         .value => |info| {
-            if (info.size > buf.len) return error.ValueTooLarge;
+            if (info.size > buf.len) {
+                // Read past it, so the connection is left at the next
+                // response and can be reused.
+                try self.reader.discardAll(info.size);
+                _ = try self.reader.takeDelimiterInclusive('\n');
+                return error.ValueTooLarge;
+            }
             try self.reader.readSliceAll(buf[0..info.size]);
             _ = try self.reader.takeDelimiterInclusive('\n');
 
